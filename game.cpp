@@ -6,8 +6,16 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <conio.h>
+#else
 #include <termios.h>
 #include <unistd.h>
+#endif
 
 static const int MAP_W     = 78;
 static const int MAP_H     = 20;
@@ -66,6 +74,62 @@ struct State {
 
 // ── Terminal ──────────────────────────────────────────────
 
+#ifdef _WIN32
+
+static HANDLE hOut, hIn;
+static DWORD origOutMode, origInMode;
+
+static void rawOff() {
+    SetConsoleMode(hOut, origOutMode);
+    SetConsoleMode(hIn, origInMode);
+    printf("\033[?25h\033[0m\033[2J\033[H");
+    fflush(stdout);
+}
+
+static void rawOn() {
+    hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    hIn  = GetStdHandle(STD_INPUT_HANDLE);
+    GetConsoleMode(hOut, &origOutMode);
+    GetConsoleMode(hIn, &origInMode);
+    atexit(rawOff);
+    SetConsoleMode(hOut, origOutMode | ENABLE_VIRTUAL_TERMINAL_PROCESSING | DISABLE_NEWLINE_AUTO_RETURN);
+    SetConsoleMode(hIn, ENABLE_PROCESSED_INPUT);
+    printf("\033[?25l");
+    fflush(stdout);
+}
+
+static Key readKey() {
+    int c = _getch();
+    switch (c) {
+        case 'q': case 'Q': return K_QUIT;
+        case 'e': case 'E': return K_USE;
+        case 'w': case 'W': return K_UP;
+        case 's': case 'S': return K_DOWN;
+        case 'a': case 'A': return K_LEFT;
+        case 'd': case 'D': return K_RIGHT;
+        case 0: case 0xE0: {
+            int ext = _getch();
+            switch (ext) {
+                case 72: return K_UP;
+                case 80: return K_DOWN;
+                case 75: return K_LEFT;
+                case 77: return K_RIGHT;
+            }
+            return K_NONE;
+        }
+    }
+    return K_NONE;
+}
+
+static void waitKey() { _getch(); }
+
+static void writeOut(const std::string& buf) {
+    DWORD written;
+    WriteConsoleA(hOut, buf.c_str(), (DWORD)buf.size(), &written, NULL);
+}
+
+#else
+
 static struct termios saved_termios;
 
 static void rawOff() {
@@ -99,20 +163,31 @@ static Key readKey() {
         case 'a': case 'A': return K_LEFT;
         case 'd': case 'D': return K_RIGHT;
         case '\033': {
-            char s[2];
-            if (read(STDIN_FILENO, &s[0], 1) != 1) return K_NONE;
-            if (read(STDIN_FILENO, &s[1], 1) != 1) return K_NONE;
-            if (s[0] == '[') {
-                if (s[1] == 'A') return K_UP;
-                if (s[1] == 'B') return K_DOWN;
-                if (s[1] == 'C') return K_RIGHT;
-                if (s[1] == 'D') return K_LEFT;
+            char seq[2];
+            if (read(STDIN_FILENO, &seq[0], 1) != 1) return K_NONE;
+            if (read(STDIN_FILENO, &seq[1], 1) != 1) return K_NONE;
+            if (seq[0] == '[') {
+                if (seq[1] == 'A') return K_UP;
+                if (seq[1] == 'B') return K_DOWN;
+                if (seq[1] == 'C') return K_RIGHT;
+                if (seq[1] == 'D') return K_LEFT;
             }
             return K_NONE;
         }
     }
     return K_NONE;
 }
+
+static void waitKey() {
+    char c;
+    if (read(STDIN_FILENO, &c, 1) < 0) return;
+}
+
+static void writeOut(const std::string& buf) {
+    if (write(STDOUT_FILENO, buf.c_str(), buf.size()) < 0) return;
+}
+
+#endif
 
 // ── Helpers ───────────────────────────────────────────────
 
@@ -158,7 +233,7 @@ static void genDungeon(State& s) {
     }
 
     if (s.rooms.size() < 2) {
-        Rect r = {2, 2, 10, 6, };
+        Rect r = {2, 2, 10, 6};
         for (int y = r.y; y < r.y + r.h; y++)
             for (int x = r.x; x < r.x + r.w; x++)
                 s.grid[y][x] = T_FLOOR;
@@ -481,7 +556,7 @@ static void render(State& s) {
     buf += hud;
     buf += "\033[K";
 
-    if (write(STDOUT_FILENO, buf.c_str(), buf.size()) < 0) return;
+    writeOut(buf);
 }
 
 // ── Screens ───────────────────────────────────────────────
@@ -513,8 +588,7 @@ static void titleScreen() {
     printf("\033[1;38;5;226m>\033[0m Stairs\n\n");
     printf("  \033[38;5;240mPress any key to begin...\033[0m\n");
     fflush(stdout);
-    char c;
-    if (read(STDIN_FILENO, &c, 1) < 0) return;
+    waitKey();
 }
 
 static void endScreen(const State& s) {
@@ -539,8 +613,7 @@ static void endScreen(const State& s) {
     printf("  \033[38;5;255mFloor:       \033[38;5;228m%d\033[0m\n\n", s.floor);
     printf("  \033[38;5;240mPress any key to exit...\033[0m\n");
     fflush(stdout);
-    char c;
-    if (read(STDIN_FILENO, &c, 1) < 0) return;
+    waitKey();
 }
 
 // ── Main ──────────────────────────────────────────────────
